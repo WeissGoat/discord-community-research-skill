@@ -1,0 +1,4 @@
+interface:
+  display_name: "Discord Community Research"
+  short_description: "Deep-search the Discord servers you have joined and get an auditable report"
+  default_prompt: "Use $discord-community-research to deep-search my joined Discord communities for a topic and produce an auditable report with Discord links."

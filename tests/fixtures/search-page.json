@@ -1,0 +1,24 @@
+{
+  "messages": [
+    [
+      {
+        "id": "1001",
+        "channel_id": "2001",
+        "timestamp": "2026-07-02T00:00:00.000Z",
+        "content": "Tool discussion https://example.test/tool",
+        "author": {
+          "id": "3001",
+          "username": "user-a",
+          "global_name": "User A"
+        },
+        "attachments": [],
+        "embeds": [],
+        "message_reference": null,
+        "type": 0
+      }
+    ]
+  ],
+  "total_results": 2,
+  "threads": [],
+  "members": []
+}
