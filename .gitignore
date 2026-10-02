@@ -1,0 +1,5 @@
+# Credentials and private research output must never be committed.
+.env
+.env.*
+discord_research/
+node_modules/
