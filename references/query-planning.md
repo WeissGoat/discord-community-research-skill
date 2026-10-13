@@ -66,6 +66,18 @@ project. A query may leave `content` empty to search by filters alone, but
 run-research picks validation servers from discovery query text, so give every
 discovery query content.
 
+## Vocabulary and Noise
+
+- When the user allows web sources, read the official docs or announcement first
+  and take the exact feature names, syntax, and tags from them (for example
+  `Text:`, `speech bubble`, `3koma`); community members use the same words.
+- Generic words, especially Chinese ones such as 分镜, 对话框 or 教程, match
+  thousands of unrelated messages in servers built around AI chat bots and
+  SillyTavern presets. Pair them with the product name (`nai5 分镜` with a
+  high slop) instead of searching them alone, even as validation queries.
+- In a product's own server (Anlatan for NovelAI), generic words are already on
+  topic; read that server's hits first.
+
 ## Two Passes
 
 1. Mark exact names, aliases, and broad problem terms as purpose: discovery.

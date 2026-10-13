@@ -354,6 +354,23 @@ test('same message matched by aliases has one record and all matchedQueries', ()
   assert.deepEqual(evidence.candidates[0].matchedQueries.sort(), ['tool', 'workflow']);
 });
 
+test('bot messages rank below people and multi-query hits rank above single ones', () => {
+  const text = 'ComfyUI workflow setup: install the node, then export the workflow';
+  const evidence = buildEvidenceIndex({
+    messages: [
+      { ...message('bot', '2026-07-01T00:00:00.000Z', text), isBot: true, matchedQueries: ['comfyui', 'workflow'] },
+      { ...message('single', '2026-07-01T00:00:00.000Z', `${text}.`), matchedQueries: ['comfyui'] },
+      { ...message('double', '2026-07-01T00:00:00.000Z', `${text}!`), matchedQueries: ['comfyui', 'workflow'] },
+    ].map((item) => ({ ...item, guildId: 'guild-1' })),
+    queryPlan: { queries: [{ id: 'comfyui', content: 'ComfyUI' }, { id: 'workflow', content: 'workflow' }] },
+    now: '2026-08-02T00:00:00.000Z',
+  });
+
+  assert.deepEqual(evidence.candidates.map((candidate) => candidate.messageId), ['double', 'single', 'bot']);
+  assert.ok(Number.isFinite(evidence.candidates[0].score));
+  assert.equal(evidence.candidates[2].penalties.botAuthor, 3);
+});
+
 test('evidence filtering requires all body terms and maps channel names from inventory', () => {
   const evidence = buildEvidenceIndex({
     messages: [

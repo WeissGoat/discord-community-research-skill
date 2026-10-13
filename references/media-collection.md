@@ -39,6 +39,14 @@ directly:
   local path, SHA-256, and status. Rerunning skips finished files.
 - Attachment links expire. Expired links are refreshed by re-reading the
   message, which needs the token. Cite jump URLs, never CDN links.
+- `--with-parameters` keeps only images that embed generation parameters. It
+  reads the first 64 KB of each file (and the last 64 KB of a PNG when
+  needed) and downloads the whole file only when a text chunk carries a
+  NovelAI, ComfyUI or A1111 keyword. A file is kept only if its parameters then
+  parse; the others are marked `no-parameters` (no file saved). Use it
+  to collect prompts from search hits without downloading every attachment;
+  reruns do not probe `no-parameters` files again, and the manifest is saved
+  every 25 files.
 
 ## Reaction-Aware Ranking
 
@@ -63,6 +71,9 @@ keeps the Discord link from the manifest.
   prompt, negative prompt (UC), steps, size, scale, CFG rescale, seed, sampler,
   and noise schedule are all present; `missing` lists the rest, and `version`
   comes from the model marker (V5, V4.5, V4; V3 for "Stable Diffusion XL").
+  V4 and later also give `characters` (each box's prompt, negative and
+  `centers`), `useCoords` (false means AI's Choice), `requestType`, and the V5
+  UI toggles `quality_boost`, `tag_hint_qt` and `tag_hint_uc_preset` as raw values.
 - ComfyUI: checkpoints, LoRAs with strengths, sampler settings, and the prompt
   text the sampler is wired to.
 - A1111/Forge: prompt, negative prompt, and the settings line.

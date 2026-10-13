@@ -270,10 +270,14 @@ export function buildEvidenceIndex({ messages = [], contexts = [], queryPlan = {
     const technicalDensity = [TECHNICAL_TERMS, DEMONSTRATION_TERMS, REPEATED_USE_TERMS].filter((patterns) => matchesAny(patterns, record.content ?? '')).length;
     const repeatedContent = (contentCounts.get(normalizedContent(record.content)) ?? 0) > 1;
     const reactionCount = knownReactionCount(record, context);
+    // Bot output (feeds, AI chat companions) is not community testimony, however
+    // technical it reads; messages several queries found are more on-topic.
     const penalties = {
       linkOnly: linkOnlyPenalty(record),
       repeatedContent: repeatedContent ? 0.75 : 0,
+      botAuthor: record.isBot ? 3 : 0,
     };
+    const queryBreadth = Math.min(2, Math.max(0, record.matchedQueries.length - 1) * 0.75);
     const signals = {
       distinctAuthors: authors.size,
       distinctGuilds: guilds.size,
@@ -284,6 +288,7 @@ export function buildEvidenceIndex({ messages = [], contexts = [], queryPlan = {
       replyCount: contextSignalsValue.replyCount,
       reactionCount,
       reactionSignal: reactionCount ? Number(Math.min(2, Math.log2(1 + reactionCount) * 0.5).toFixed(3)) : 0,
+      queryBreadth,
     };
     const score = Number((
       technicalDensity * 2
@@ -291,7 +296,9 @@ export function buildEvidenceIndex({ messages = [], contexts = [], queryPlan = {
       + Math.min(1, signals.contextMessages / 4)
       + Math.min(1, signals.replyCount / 2)
       + signals.reactionSignal
+      + queryBreadth
       - penalties.linkOnly
+      - penalties.botAuthor
       - penalties.repeatedContent
     ).toFixed(3));
     return {

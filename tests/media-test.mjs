@@ -257,3 +257,94 @@ test('an image without generation text is unknown rather than evidence of anothe
   assert.deepEqual([metadata.generation.generator, Object.keys(metadata.text)], ['unknown', ['Title']]);
   assert.equal(readImageMetadata(Buffer.from('not an image')).format, null);
 });
+
+test('--with-parameters reads file headers and downloads only images that embed parameters', async () => {
+  const directory = makeTempRoot();
+  const novelai = { Software: 'NovelAI', Source: 'NovelAI Diffusion V5 12345678', Comment: JSON.stringify(NOVELAI_COMMENT) };
+  const pixels = chunk('IDAT', Buffer.alloc(2000, 7));
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(832, 0);
+  header.writeUInt32BE(1216, 4);
+  const textAfterPixels = Buffer.concat([PNG_SIGNATURE, chunk('IHDR', header), pixels,
+    chunk('tEXt', Buffer.from(`Software\0NovelAI`)), chunk('tEXt', Buffer.from(`Comment\0${JSON.stringify(NOVELAI_COMMENT)}`)), chunk('IEND', Buffer.alloc(0))]);
+  const files = {
+    'https://cdn.example/head.png': png(novelai, { chunks: [pixels] }),
+    'https://cdn.example/tail.png': textAfterPixels,
+    'https://cdn.example/plain.png': png({}, { chunks: [pixels] }),
+    'https://cdn.example/small.png': png(novelai),
+  };
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    const range = options.headers?.Range ?? null;
+    requests.push(`${url.split('/').pop()} ${range ?? 'full'}`);
+    assert.deepEqual(Object.keys(options.headers ?? {}).filter((name) => name !== 'Range'), [], 'only a Range header is sent');
+    const body = files[url];
+    if (!range) return { ...fetchResponse(200, body), headers: new Headers() };
+    const [, start, end, suffix] = /bytes=(?:(\d+)-(\d+)|-(\d+))/.exec(range);
+    const from = suffix ? Math.max(0, body.length - Number(suffix)) : Number(start);
+    const slice = body.subarray(from, suffix ? body.length : Math.min(body.length, Number(end) + 1));
+    return { ...fetchResponse(206, slice), headers: new Headers({ 'content-range': `bytes ${from}-${from + slice.length - 1}/${body.length}` }) };
+  };
+  const items = Object.keys(files).map((url, index) => ({ key: `p${index}`, messageId: `p${index}`, channelId: 'c1', index: 0, filename: url.split('/').pop(), url }));
+  const results = await downloadMedia({ items, directory, fetchImpl, concurrency: 1, sleep: async () => {}, probeBytes: 1024 });
+
+  assert.deepEqual(results.map((item) => item.status), ['downloaded', 'downloaded', 'no-parameters', 'downloaded']);
+  assert.deepEqual(results.map((item) => item.parameters?.version ?? item.parameters?.generator ?? null), ['V5', 'novelai', null, 'V5']);
+  assert.equal(results[2].localPath, null);
+  assert.deepEqual(requests, [
+    'head.png bytes=0-1023', 'head.png full',
+    'tail.png bytes=0-1023', 'tail.png bytes=-65536', 'tail.png full',
+    'plain.png bytes=0-1023', 'plain.png bytes=-65536',
+    'small.png bytes=0-1023',
+  ]);
+  assert.ok(fs.readFileSync(path.join(directory, results[3].localPath)).equals(files['https://cdn.example/small.png']), 'a file smaller than the probe is saved from it');
+});
+
+test('NovelAI V4+ character prompts keep their positions and negative prompts', () => {
+  const comment = {
+    ...NOVELAI_COMMENT,
+    request_type: 'PromptGenerateRequest',
+    v4_prompt: {
+      caption: { base_caption: '3 panel comic, top panel: 2girls talking', char_captions: [{ char_caption: 'girl, red hair, speech bubble says "Hi!"', centers: [{ x: 0.3, y: 0.1 }] }, { char_caption: 'girl, blue hair', centers: [{ x: 0.7, y: 0.5 }] }] },
+      use_coords: true,
+      use_order: true,
+    },
+    v4_negative_prompt: { caption: { base_caption: 'lowres', char_captions: [{ char_caption: 'hat', centers: [{ x: 0.3, y: 0.1 }] }, { char_caption: '', centers: [] }] } },
+  };
+  const { generation } = readImageMetadata(png({ Software: 'NovelAI', Source: 'NovelAI Diffusion V5 12345678', Comment: JSON.stringify(comment) }));
+  assert.equal(generation.version, 'V5');
+  assert.equal(generation.useCoords, true);
+  assert.deepEqual(generation.characters, [
+    { prompt: 'girl, red hair, speech bubble says "Hi!"', negativePrompt: 'hat', centers: [{ x: 0.3, y: 0.1 }] },
+    { prompt: 'girl, blue hair', negativePrompt: '', centers: [{ x: 0.7, y: 0.5 }] },
+  ]);
+  const legacy = readImageMetadata(png({ Software: 'NovelAI', Comment: JSON.stringify(NOVELAI_COMMENT) })).generation;
+  assert.equal(legacy.characters, undefined);
+});
+
+test('--with-parameters follows a parameter chunk cut off by the probe and drops files whose chunk does not parse', async () => {
+  const directory = makeTempRoot();
+  const comment = JSON.stringify({ ...NOVELAI_COMMENT, padding: 'x'.repeat(3000) });
+  const files = {
+    'https://cdn.example/cut.png': png({ Software: 'NovelAI', Comment: comment }, { chunks: [chunk('IDAT', Buffer.alloc(500))] }),
+    'https://cdn.example/note.png': png({ Comment: 'scanned at the library' }, { chunks: [chunk('IDAT', Buffer.alloc(3000))] }),
+  };
+  const requests = [];
+  const fetchImpl = async (url, options) => {
+    const range = options.headers?.Range ?? null;
+    requests.push(`${url.split('/').pop()} ${range ?? 'full'}`);
+    const body = files[url];
+    if (!range) return { ...fetchResponse(200, body), headers: new Headers() };
+    const [, start, end, suffix] = /bytes=(?:(\d+)-(\d+)|-(\d+))/.exec(range);
+    const from = suffix ? Math.max(0, body.length - Number(suffix)) : Number(start);
+    const slice = body.subarray(from, suffix ? body.length : Math.min(body.length, Number(end) + 1));
+    return { ...fetchResponse(206, slice), headers: new Headers({ 'content-range': `bytes ${from}-${from + slice.length - 1}/${body.length}` }) };
+  };
+  const items = Object.keys(files).map((url, index) => ({ key: `q${index}`, messageId: `q${index}`, channelId: 'c1', index: 0, filename: url.split('/').pop(), url }));
+  const results = await downloadMedia({ items, directory, fetchImpl, concurrency: 1, sleep: async () => {}, probeBytes: 256 });
+
+  assert.deepEqual(results.map((item) => item.status), ['downloaded', 'no-parameters']);
+  assert.equal(results[0].parameters.generator, 'novelai');
+  assert.deepEqual(requests, ['cut.png bytes=0-255', 'cut.png full', 'note.png bytes=0-255', 'note.png full']);
+  assert.ok(!fs.existsSync(path.join(directory, 'files', 'q1_0_note.png')), 'a file without parameters is not kept');
+});

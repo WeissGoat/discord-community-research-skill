@@ -242,7 +242,26 @@ function novelAi({ text, comment, software }) {
   };
   // An empty negative prompt is a real setting; a missing one is unknown.
   const missing = NOVELAI_REQUIRED_FIELDS.filter((field) => params[field] == null || (field !== 'negativePrompt' && params[field] === ''));
-  return { generator: 'novelai', version: novelAiVersion(modelName), software, params, complete: missing.length === 0, missing };
+  // V4 and later: per-character prompts, with positions when AI's Choice is off.
+  const negatives = comment.v4_negative_prompt?.caption?.char_captions ?? [];
+  const characters = (comment.v4_prompt?.caption?.char_captions ?? []).map((character, index) => ({
+    prompt: character.char_caption ?? null,
+    negativePrompt: negatives[index]?.char_caption ?? null,
+    centers: (character.centers ?? []).map(({ x, y }) => ({ x, y })),
+  }));
+  const layout = comment.v4_prompt ? { characters, useCoords: comment.v4_prompt.use_coords ?? null, useOrder: comment.v4_prompt.use_order ?? null } : null;
+  return {
+    generator: 'novelai',
+    version: novelAiVersion(modelName),
+    software,
+    params,
+    ...layout,
+    requestType: comment.request_type ?? null,
+    // V5 UI toggles, kept raw: their value meanings are not documented.
+    toggles: Object.fromEntries(['quality_boost', 'tag_hint_qt', 'tag_hint_uc_preset'].filter((key) => key in comment).map((key) => [key, comment[key]])),
+    complete: missing.length === 0,
+    missing,
+  };
 }
 
 function comfyUi(prompt, workflow) {

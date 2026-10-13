@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 
+import { detectFormat, readImageMetadata } from './image-metadata.mjs';
 import { writeTextAtomic } from './io.mjs';
 
 export const DEFAULT_MEDIA_TYPES = ['png', 'jpg', 'jpeg', 'webp', 'gif'];
@@ -101,20 +102,68 @@ function sha256(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
 }
 
-async function fetchBuffer(fetchImpl, url, timeoutMs) {
+async function fetchBuffer(fetchImpl, url, timeoutMs, headers = {}) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(new DOMException(`Download timed out after ${timeoutMs}ms`, 'TimeoutError')), timeoutMs);
   try {
     // CDN links are signed; the Discord token is never sent with them.
-    const response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal });
+    // Only a Range header is ever added, for --with-parameters probes.
+    const response = await fetchImpl(url, { redirect: 'follow', signal: controller.signal, ...(Object.keys(headers).length ? { headers } : {}) });
     if (!response.ok) return { status: response.status };
-    return { status: response.status, buffer: Buffer.from(await response.arrayBuffer()) };
+    const buffer = Buffer.from(await response.arrayBuffer());
+    // A 206 that covers the whole file is as good as a full download.
+    const total = Number(/\/(\d+)\s*$/.exec(response.headers?.get?.('content-range') ?? '')?.[1]);
+    return { status: response.status, buffer, complete: response.status !== 206 || total === buffer.length };
   } finally {
     clearTimeout(timer);
   }
 }
 
-async function downloadOne(item, { directory, retries, timeoutMs, refresh, fetchImpl, sleep, now }) {
+export const DEFAULT_PROBE_BYTES = 65536;
+const TAIL_PROBE_BYTES = 65536;
+const TEXT_CHUNKS = ['tEXt', 'iTXt', 'zTXt'];
+// Text chunk keywords that NovelAI (Comment), A1111 (parameters) and ComfyUI (prompt, workflow) write.
+const PARAMETER_KEYS = new Set(['Comment', 'parameters', 'prompt', 'workflow']);
+
+function generationSummary(buffer) {
+  const generation = readImageMetadata(buffer).generation;
+  if (!generation || generation.generator === 'unknown') return null;
+  return { generator: generation.generator, version: generation.version ?? null };
+}
+
+function keyword(buffer, start) {
+  const end = buffer.indexOf(0, start);
+  return end > start && end - start < 80 ? buffer.toString('latin1', start, end) : null;
+}
+
+// Keywords of the PNG text chunks in the first bytes of a file. The keyword
+// leads the chunk, so a chunk cut off by the probe still names itself.
+export function pngTextKeys(head) {
+  const keys = new Set();
+  for (let offset = 8; offset + 8 <= head.length;) {
+    const length = head.readUInt32BE(offset);
+    const type = head.toString('latin1', offset + 4, offset + 8);
+    if (type === 'IDAT' || type === 'IEND') break;
+    if (TEXT_CHUNKS.includes(type)) keys.add(keyword(head, offset + 8));
+    offset += 12 + length;
+  }
+  keys.delete(null);
+  return keys;
+}
+
+// Text chunks may also follow the image data; find them by their type marker.
+export function pngTextKeysInTail(tail) {
+  const keys = new Set();
+  for (const type of TEXT_CHUNKS) {
+    for (let index = tail.indexOf(type, 4, 'latin1'); index !== -1; index = tail.indexOf(type, index + 4, 'latin1')) keys.add(keyword(tail, index + 4));
+  }
+  keys.delete(null);
+  return keys;
+}
+
+const namesParameters = (keys) => [...keys].some((key) => PARAMETER_KEYS.has(key));
+
+async function downloadOne(item, { directory, retries, timeoutMs, refresh, fetchImpl, sleep, now, probeBytes }) {
   const localPath = path.join(directory, 'files', safeName(item));
   const result = { ...item, localPath: path.relative(directory, localPath), status: 'failed', httpStatus: null, bytes: null, sha256: null, refreshed: false, error: null };
   const existing = fs.existsSync(localPath) ? fs.statSync(localPath) : null;
@@ -141,29 +190,63 @@ async function downloadOne(item, { directory, retries, timeoutMs, refresh, fetch
     if (!(await renew())) return { ...result, error: unrenewable() };
   }
 
-  for (let attempt = 0; attempt <= retries; attempt += 1) {
-    let response;
-    try {
-      response = await fetchBuffer(fetchImpl, url, timeoutMs);
-    } catch (error) {
-      result.error = error?.name === 'TimeoutError' ? error.message : error?.cause?.code ?? error?.message ?? String(error);
-      if (attempt < retries) await sleep(Math.min(15000, 1000 * 2 ** attempt));
-      continue;
+  // Returns a response with bytes, or null after recording the error.
+  const request = async (headers = {}) => {
+    for (let attempt = 0; attempt <= retries; attempt += 1) {
+      let response;
+      try {
+        response = await fetchBuffer(fetchImpl, url, timeoutMs, headers);
+      } catch (error) {
+        result.error = error?.name === 'TimeoutError' ? error.message : error?.cause?.code ?? error?.message ?? String(error);
+        if (attempt < retries) await sleep(Math.min(15000, 1000 * 2 ** attempt));
+        continue;
+      }
+      result.httpStatus = response.status;
+      if (response.buffer?.length) {
+        result.error = null;
+        return response;
+      }
+      if (EXPIRED_STATUSES.has(response.status) && !result.refreshed) {
+        if (!(await renew())) {
+          result.error = `HTTP ${response.status}; ${unrenewable()}`;
+          return null;
+        }
+        continue;
+      }
+      result.error = response.buffer ? 'empty response' : `HTTP ${response.status}`;
+      if (!RETRYABLE_STATUSES.has(response.status) || attempt >= retries) break;
+      await sleep(Math.min(15000, 1000 * 2 ** attempt));
     }
-    result.httpStatus = response.status;
-    if (response.buffer?.length) {
-      writeTextAtomic(localPath, response.buffer);
-      return { ...result, status: 'downloaded', bytes: response.buffer.length, sha256: sha256(response.buffer), error: null };
-    }
-    if (EXPIRED_STATUSES.has(response.status) && !result.refreshed) {
-      if (!(await renew())) return { ...result, error: `HTTP ${response.status}; ${unrenewable()}` };
-      continue;
-    }
-    result.error = response.buffer ? 'empty response' : `HTTP ${response.status}`;
-    if (!RETRYABLE_STATUSES.has(response.status) || attempt >= retries) break;
-    await sleep(Math.min(15000, 1000 * 2 ** attempt));
+    return null;
+  };
+  const save = (buffer) => {
+    writeTextAtomic(localPath, buffer);
+    return { ...result, status: 'downloaded', bytes: buffer.length, sha256: sha256(buffer), error: null };
+  };
+
+  if (!probeBytes) {
+    const response = await request();
+    return response ? save(response.buffer) : result;
   }
-  return result;
+
+  // Generation parameters sit in text chunks, usually before the image data;
+  // read the head first and fetch the whole file only when one is named.
+  const skip = { ...result, localPath: null, status: 'no-parameters', parameters: null };
+  const head = await request({ Range: `bytes=0-${probeBytes - 1}` });
+  if (!head) return result;
+  const png = detectFormat(head.buffer) === 'png';
+  let named = png ? namesParameters(pngTextKeys(head.buffer)) : head.complete || Boolean(generationSummary(head.buffer));
+  if (!named && png && !head.complete) {
+    const tail = await request({ Range: `bytes=-${TAIL_PROBE_BYTES}` });
+    if (!tail) return result;
+    named = namesParameters(pngTextKeysInTail(tail.buffer));
+  }
+  if (!named) return skip;
+  const file = head.complete ? head : await request();
+  if (!file) return result;
+  // A chunk name alone is not proof; keep the file only if the parameters parse.
+  const parameters = generationSummary(file.buffer);
+  return parameters ? { ...save(file.buffer), parameters } : skip;
 }
 
 export async function downloadMedia({
@@ -177,6 +260,7 @@ export async function downloadMedia({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   now = () => Date.now(),
   onItem = () => {},
+  probeBytes = 0,
 } = {}) {
   const results = new Array(items.length);
   let next = 0;
@@ -184,7 +268,7 @@ export async function downloadMedia({
     while (next < items.length) {
       const index = next;
       next += 1;
-      results[index] = await downloadOne(items[index], { directory, retries, timeoutMs, refresh, fetchImpl, sleep, now });
+      results[index] = await downloadOne(items[index], { directory, retries, timeoutMs, refresh, fetchImpl, sleep, now, probeBytes });
       await onItem(results[index], index);
     }
   }

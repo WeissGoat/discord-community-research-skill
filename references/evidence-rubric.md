@@ -45,3 +45,9 @@ project or prove that an official relationship exists.
 Every key finding should cite a Discord jump URL. Do not use attachment CDN URLs
 as durable citations, and do not imply that external validation occurred unless it
 was explicitly enabled and reported in a separate section.
+
+Ranking (evidence.json score) adds technical density, recency, context,
+replies, reactions, and a bonus for messages several queries matched; it
+subtracts for link-only and repeated messages and for bot authors, whose output
+(feeds, AI chat companions) is not community testimony. Long AI-written replies
+pasted by people still rank high, so read before citing.
