@@ -84,6 +84,15 @@ ranking, and embedded generation parameters. history.mjs marks each channel
 complete, truncated, or failed; only complete channels support claims that
 something was not posted there.
 
+**Downloading needs no token.** Attachment URLs from Discord's CDN carry their
+own signature (`?ex=&is=&hm=`), so `media.mjs --download` fetches them with a
+plain GET and no `Authorization` header, right up to the `ex` timestamp. Only
+listing (reading messages) and refreshing a link that already expired need the
+token. Practical consequence: if the token stops working mid-collection, keep
+downloading — the links listed less than a day ago still work. Read the `ex`
+values and finish the download before they lapse, because after that the URLs
+cannot be renewed without the token.
+
 ## Non-Negotiable Rules
 
 - Discord-only by default; external validation requires explicit user approval.

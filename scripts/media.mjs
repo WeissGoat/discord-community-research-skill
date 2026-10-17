@@ -25,6 +25,7 @@ export const COMMAND = {
   },
   notes: [
     'Rerunning with the same --output keeps files already downloaded.',
+    'Downloading needs no token: attachment CDN links are signed and work with a plain GET until their ex time passes; only listing and refreshing expired links need the token.',
     '--with-parameters marks files without NovelAI, ComfyUI, or A1111 text metadata as no-parameters; pixel-hidden (stealth) data is not checked.',
     'Expired attachment links are refreshed by re-reading their message, which needs the Discord token; listing does not.',
   ],
