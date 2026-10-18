@@ -26,6 +26,13 @@ directly:
    `--max-messages`, or failed. Report truncated and failed threads and rerun
    failed ones with `--channel`.
 
+The history command enforces the collection budget in
+[SKILL.md](../SKILL.md#rate-limit-and-ban-guard): 5,000 messages per channel,
+50,000 per run, concurrency 1 (never above 2), and 1-3 seconds between
+authenticated requests. The first HTTP 429 stops the run without retrying.
+Split a deep channel into narrower date windows and run them later instead of
+raising these caps.
+
 ## Select and Download Attachments
 
 `node <skill-dir>/scripts/media.mjs --input <dir>/messages.ndjson --output <dir>/media --min-dimension 512 --download`

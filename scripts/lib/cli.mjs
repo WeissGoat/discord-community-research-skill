@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util';
 import { checkAccess, createDiscordClient } from './api.mjs';
 import { resolveToken } from './io.mjs';
 
-export const EXIT_CODES = { ok: 0, failure: 1, auth: 2, network: 3 };
+export const EXIT_CODES = { ok: 0, failure: 1, auth: 2, network: 3, rateLimit: 4 };
 
 // Every command that talks to Discord accepts these.
 const DISCORD_OPTIONS = {
@@ -12,7 +12,7 @@ const DISCORD_OPTIONS = {
   'base-url': { type: 'string', value: '<url>', description: 'Discord API base URL (default https://discord.com/api/v10)' },
 };
 const HELP_OPTION = { help: { type: 'boolean', short: 'h', description: 'show this help' } };
-const DISCORD_EXIT_NOTE = 'Exit codes: 0 done, 1 failed, 2 Discord rejected the token, 3 network or proxy failure.';
+const DISCORD_EXIT_NOTE = 'Exit codes: 0 done, 1 failed, 2 Discord rejected the token, 3 network or proxy failure, 4 rate limited (run stopped).';
 
 export class UsageError extends Error {
   constructor(message) {
@@ -125,6 +125,16 @@ export function createAbortBreaker(networkFailureLimit = DEFAULT_NETWORK_FAILURE
         breaker.aborted = { reason: 'auth', message: error.message ?? 'Discord rejected the token' };
         return;
       }
+      // A 429 is a stop sign, not a retry signal. Never continue with the
+      // remaining channels after the first one.
+      if (error.status === 429 || error.rateLimited) {
+        breaker.aborted = {
+          reason: 'rateLimit',
+          message: error.message ?? 'Discord rate limit hit',
+          retryAfterMs: error.retryAfterMs ?? null,
+        };
+        return;
+      }
       consecutiveNetworkFailures = error.network ? consecutiveNetworkFailures + 1 : 0;
       if (consecutiveNetworkFailures >= networkFailureLimit) {
         breaker.aborted = { reason: 'network', message: `${consecutiveNetworkFailures} consecutive failures with network errors: ${error.message ?? 'unknown error'}` };
@@ -140,6 +150,7 @@ export function exitCodeForAbort(aborted) {
 }
 
 export function exitCodeForError(error) {
+  if (error?.status === 429 || error?.rateLimited) return EXIT_CODES.rateLimit;
   if (error?.status === 401) return EXIT_CODES.auth;
   if (error?.network) return EXIT_CODES.network;
   return EXIT_CODES.failure;
@@ -152,6 +163,10 @@ export async function runCommand(main) {
   } catch (error) {
     const detail = { error: error?.message ?? String(error) };
     if (error?.status) detail.status = error.status;
+    if (error?.rateLimited) {
+      detail.rateLimited = true;
+      detail.retryAfterMs = error.retryAfterMs ?? null;
+    }
     process.stderr.write(`${JSON.stringify(detail)}\n`);
     process.exitCode = exitCodeForError(error);
   }

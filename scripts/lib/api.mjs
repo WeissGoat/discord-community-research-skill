@@ -1,20 +1,25 @@
 const DEFAULT_BASE_URL = 'https://discord.com/api/v10';
 const DEFAULT_MAX_RETRIES = 5;
+const DEFAULT_REQUEST_INTERVAL_MIN_MS = 1000;
+const DEFAULT_REQUEST_INTERVAL_MAX_MS = 3000;
 const DEFAULT_MAX_OFFSET = 5000;
 const DEFAULT_REQUEST_TIMEOUT_MS = 30000;
 const EMPTY_PAGE_THRESHOLD = 2;
-const TRANSIENT_STATUSES = new Set([202, 429, 500, 502, 503, 504]);
+// 429 is deliberately absent: the first one stops the run instead of retrying.
+const TRANSIENT_STATUSES = new Set([202, 500, 502, 503, 504]);
 // Stop reasons that end a walk before Discord's reported total was reached
 // without hitting one of the plan's own limits.
 const EARLY_STOP_REASONS = new Set(['empty-pages', 'no-window', 'lower-bound', 'window-stalled']);
 
 export class DiscordApiError extends Error {
-  constructor(message, { status = null, retryable = false, network = false, body = null, attempts = 0, cause = null } = {}) {
+  constructor(message, { status = null, retryable = false, network = false, rateLimited = false, retryAfterMs = null, body = null, attempts = 0, cause = null } = {}) {
     super(message, cause ? { cause } : undefined);
     this.name = 'DiscordApiError';
     this.status = status;
     this.retryable = retryable;
     this.network = network;
+    this.rateLimited = rateLimited;
+    this.retryAfterMs = retryAfterMs;
     this.body = body;
     this.attempts = attempts;
   }
@@ -204,12 +209,37 @@ export function createDiscordClient({
   sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
   maxRetries = DEFAULT_MAX_RETRIES,
   requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS,
+  requestIntervalMinMs = DEFAULT_REQUEST_INTERVAL_MIN_MS,
+  requestIntervalMaxMs = DEFAULT_REQUEST_INTERVAL_MAX_MS,
+  random = Math.random,
+  now = () => Date.now(),
   baseUrl = DEFAULT_BASE_URL,
 } = {}) {
   if (!token) throw new Error('Discord token is required');
   if (typeof fetchImpl !== 'function') throw new TypeError('fetchImpl must be a function');
 
+  // Authenticated requests are spaced 1-3 seconds apart by default. The
+  // chain keeps the gap even when search workers run in parallel.
+  const minGapMs = Math.max(0, Math.floor(Number(requestIntervalMinMs) || 0));
+  const maxGapMs = Math.max(minGapMs, Math.floor(Number(requestIntervalMaxMs) || minGapMs));
+  let paceChain = Promise.resolve();
+  let nextRequestAt = 0;
+  async function waitForTurn() {
+    const turn = paceChain.then(async () => {
+      const waitMs = Math.max(0, nextRequestAt - now());
+      if (waitMs) await sleep(waitMs);
+      nextRequestAt = now() + minGapMs + Math.floor(random() * (maxGapMs - minGapMs + 1));
+    });
+    paceChain = turn.catch(() => {});
+    await turn;
+  }
+
+  // One 429 ends the whole process. Latching the failure means even a caller
+  // that ignores the error cannot send another request by accident.
+  let rateLimitTrip = null;
+
   async function fetchOnce(path) {
+    await waitForTurn();
     const controller = new AbortController();
     // A referenced timer, unlike AbortSignal.timeout, keeps the process alive
     // until a hung request is aborted.
@@ -230,6 +260,7 @@ export function createDiscordClient({
   }
 
   async function getJson(path, { maxRetries: retryLimit = maxRetries } = {}) {
+    if (rateLimitTrip) throw rateLimitTrip;
     let attempt = 0;
     while (true) {
       let response;
@@ -252,6 +283,22 @@ export function createDiscordClient({
 
       if (response.ok && response.status !== 202) return body;
 
+      if (response.status === 429) {
+        const waitMs = retryAfterMs(body, response.headers, 0, 429);
+        rateLimitTrip = new DiscordApiError(
+          `Discord rate limit hit (HTTP 429); stopped without retrying. retry_after=${Math.ceil(waitMs / 1000)}s`,
+          {
+            status: 429,
+            retryable: true,
+            rateLimited: true,
+            retryAfterMs: waitMs,
+            body: redact(body, token),
+            attempts: attempt + 1,
+          },
+        );
+        throw rateLimitTrip;
+      }
+
       const retryable = TRANSIENT_STATUSES.has(response.status);
       if (!retryable || attempt >= retryLimit) {
         const safeBody = redact(body, token);
@@ -272,6 +319,10 @@ export function createDiscordClient({
   // Read-only by design: the client exposes no endpoint that changes Discord state.
   return {
     getJson,
+    rateLimitStatus: () => (rateLimitTrip ? {
+      retryAfterMs: rateLimitTrip.retryAfterMs,
+      body: rateLimitTrip.body,
+    } : null),
     whoami: (options) => getJson('/users/@me', options),
     inventoryGuilds: () => getJson('/users/@me/guilds'),
     inventoryChannels: (guildId) => getJson(`/guilds/${encodeURIComponent(guildId)}/channels`),

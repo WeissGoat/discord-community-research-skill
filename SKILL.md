@@ -93,6 +93,28 @@ downloading — the links listed less than a day ago still work. Read the `ex`
 values and finish the download before they lapse, because after that the URLs
 cannot be renewed without the token.
 
+## Rate-Limit and Ban Guard
+
+Treat authenticated reads as a slow background job, especially with a personal
+token. These are hard stops, not suggestions:
+
+- **The first HTTP 429 ends the run.** The client latches the trip and refuses
+  every later request in that process. Do not sleep-and-retry, do not switch
+  accounts, and do not resume the same day. Errors carry `retry_after`; wait at
+  least that long, and preferably until the next day.
+- **At most 50,000 messages per run**, across all channels and threads.
+- **At most 5,000 messages per channel or thread.** For deeper coverage use a
+  narrower `--after` / `--before` window in a separate, later run; do not raise
+  the cap.
+- **Concurrency 1, never above 2.** History walks are sequential; search plans
+  are clamped to two workers.
+- **Authenticated API requests are spaced 1-3 seconds apart.** The client adds
+  jitter automatically. Do not disable pacing for a user token.
+- **401 means the token is dead; 403 means the channel is not visible.** Neither
+  is a reason to retry faster. Stop on 401 and record 403 as a permission gap.
+- Large collections belong to a bot token. A personal token driving a self-bot
+  violates Discord's terms and can be banned even when the rate looks modest.
+
 ## Non-Negotiable Rules
 
 - Discord-only by default; external validation requires explicit user approval.
@@ -104,7 +126,7 @@ cannot be renewed without the token.
 - Truncation and inaccessible servers are visible in the final report.
 - Do not claim absence without sufficient completed coverage.
 - Never print or persist Discord credentials.
-- Keep options.concurrency bounded (default 1; use 2-3 only when rate limits allow).
+- Keep options.concurrency at 1, never above 2. See Rate-Limit and Ban Guard.
 - Treat project-linked as a concrete external project URL mentioned in Discord,
   unverified-claim as an official or official-sounding claim without such a URL,
   and community-only as ordinary community evidence.

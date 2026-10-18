@@ -271,7 +271,9 @@ async function runWorkers(tasks, concurrency, worker) {
       await worker(task);
     }
   }
-  const requested = Number.isFinite(concurrency) && concurrency > 0 ? Math.floor(concurrency) : 1;
+  // Two is the absolute ceiling for a user-token credential. More workers
+  // multiply the burst rate without making Discord answer faster.
+  const requested = Number.isFinite(concurrency) && concurrency > 0 ? Math.min(2, Math.floor(concurrency)) : 1;
   const workerCount = Math.min(tasks.length, requested);
   await Promise.all(Array.from({ length: workerCount }, () => next()));
 }

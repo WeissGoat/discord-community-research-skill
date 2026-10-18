@@ -76,6 +76,7 @@ test('a rate-limited query remains retryable and is not added to completed', asy
   assert.equal(task.status, 'retryable');
   assert.deepEqual(state.completed, []);
   assert.equal(loadJson(runDir.state).tasks[task.key].status, 'retryable');
+  assert.equal(state.aborted.reason, 'rateLimit');
 });
 
 test('resuming a run skips success but retries retryable work', async () => {
@@ -95,7 +96,7 @@ test('resuming a run skips success but retries retryable work', async () => {
   const failingClient = {
     async searchPage(_guildId, criteria) {
       calls += 1;
-      if (criteria.content === 'tool') throw new DiscordApiError('rate limited', { status: 429, retryable: true });
+      if (criteria.content === 'tool') throw new DiscordApiError('temporary 503', { status: 503, retryable: true });
       return { messages: [[message('success-1')]], total_results: 1 };
     },
   };

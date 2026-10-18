@@ -94,6 +94,8 @@ test('search criteria map to every Discord filter and reject typos before any re
   const urls = [];
   const client = createDiscordClient({
     token: 'token',
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
     fetchImpl: async (url) => {
       urls.push(new URL(url));
       return { ok: true, status: 200, headers: new Headers(), text: async () => JSON.stringify({ total_results: 0, messages: [] }) };
@@ -226,6 +228,34 @@ test('a rejected token stops history and leaves the remaining channels pending',
   const result = await collectHistory({ client, targets: [{ id: 'c1' }, { id: 'c2' }], outputPath: path.join(makeTempRoot(), 'out.ndjson'), onProgress: () => {} });
   assert.deepEqual(result.channels.map((channel) => channel.status), ['failed', 'pending']);
   assert.equal(result.aborted.reason, 'auth');
+});
+
+test('history stops at the total message cap and leaves later channels pending', async () => {
+  const client = historyClient(
+    {
+      c1: Array.from({ length: 150 }, (_, minute) => historyMessage(minute)),
+      c2: Array.from({ length: 150 }, (_, minute) => historyMessage(minute)),
+    },
+    {
+      channels: {
+        c1: { id: 'c1', type: 0, name: 'one', guild_id: 'g1' },
+        c2: { id: 'c2', type: 0, name: 'two', guild_id: 'g1' },
+      },
+    },
+  );
+  const result = await collectHistory({
+    client,
+    targets: [{ id: 'c1' }, { id: 'c2' }],
+    outputPath: path.join(makeTempRoot(), 'out.ndjson'),
+    maxTotalMessages: 120,
+    onProgress: () => {},
+  });
+
+  assert.equal(result.totals.messages, 120);
+  assert.equal(result.totals.atTotalCap, true);
+  assert.deepEqual(result.channels.map((channel) => [channel.status, channel.messages ?? 0]), [['truncated', 120], ['pending', 0]]);
+  assert.equal(result.channels[0].stopReason, 'max-total-messages');
+  assert.equal(result.channels[1].reason, 'max-total-messages');
 });
 
 function thread(id, minute, extra = {}) {

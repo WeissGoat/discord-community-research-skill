@@ -27,26 +27,61 @@ function response(status, body, headers = {}) {
   };
 }
 
-test('retries 429 using retry_after and returns the eventual JSON', async () => {
+test('stops on the first 429 without retrying, and latches the trip', async () => {
   const calls = [];
   const waits = [];
   const fetchImpl = async (url) => {
     calls.push(url);
-    if (calls.length === 1) return response(429, { retry_after: 0.01, global: false });
-    return response(200, [{ id: 'guild-1', name: 'Guild One' }]);
+    return response(429, { retry_after: 0.01, global: false });
   };
   const client = createDiscordClient({
     token: 'secret-token-value',
     fetchImpl,
     sleep: async (ms) => waits.push(ms),
     maxRetries: 2,
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
   });
 
-  const data = await client.inventoryGuilds();
+  await assert.rejects(
+    client.inventoryGuilds(),
+    (error) => {
+      assert.ok(error instanceof DiscordApiError);
+      assert.equal(error.status, 429);
+      assert.equal(error.rateLimited, true);
+      assert.equal(error.retryAfterMs, 10);
+      assert.doesNotMatch(error.message, /secret-token-value/);
+      return true;
+    },
+  );
+  await assert.rejects(client.whoami(), (error) => error.rateLimited === true);
 
-  assert.equal(data[0].id, 'guild-1');
-  assert.equal(calls.length, 2);
-  assert.deepEqual(waits, [10]);
+  assert.equal(calls.length, 1);
+  assert.deepEqual(waits, []);
+});
+
+test('paces authenticated requests with a jittered 1-3 second gap', async () => {
+  let clock = 0;
+  const waits = [];
+  const client = createDiscordClient({
+    token: 'secret-token-value',
+    fetchImpl: async () => response(200, { ok: true }),
+    sleep: async (ms) => {
+      waits.push(ms);
+      clock += ms;
+    },
+    now: () => clock,
+    random: () => 0.5,
+    requestIntervalMinMs: 1000,
+    requestIntervalMaxMs: 3000,
+    maxRetries: 0,
+  });
+
+  await client.getJson('/one');
+  await client.getJson('/two');
+  await client.getJson('/three');
+
+  assert.deepEqual(waits, [2000, 2000]);
 });
 
 test('retries 202 and transient 503 without treating either as success', async () => {
@@ -64,6 +99,8 @@ test('retries 202 and transient 503 without treating either as success', async (
     },
     sleep: async (ms) => waits.push(ms),
     maxRetries: 3,
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
   });
 
   const data = await client.getJson('/health');
@@ -74,19 +111,21 @@ test('retries 202 and transient 503 without treating either as success', async (
   assert.equal(waits[1], 2000);
 });
 
-test('throws a status-bearing retryable error after bounded retries', async () => {
+test('throws a status-bearing retryable error after bounded 5xx retries', async () => {
   const client = createDiscordClient({
     token: 'secret-token-value',
-    fetchImpl: async () => response(429, { retry_after: 0 }),
+    fetchImpl: async () => response(503, { message: 'temporary' }),
     sleep: async () => {},
     maxRetries: 1,
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
   });
 
   await assert.rejects(
     client.getJson('/limited'),
     (error) => {
       assert.ok(error instanceof DiscordApiError);
-      assert.equal(error.status, 429);
+      assert.equal(error.status, 503);
       assert.equal(error.retryable, true);
       assert.doesNotMatch(error.message, /secret-token-value/);
       return true;
@@ -254,6 +293,8 @@ test('search forwards slop so multi-word queries can match words far apart', asy
       urls.push(url);
       return response(200, { messages: [], total_results: 0 });
     },
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
   });
 
   await client.searchPage('4001', { content: 'ComfyUI MCP', slop: 100 });
@@ -266,6 +307,8 @@ test('a hung request times out as a retryable network error', async () => {
     token: 'secret-token-value',
     requestTimeoutMs: 20,
     maxRetries: 0,
+    requestIntervalMinMs: 0,
+    requestIntervalMaxMs: 0,
     fetchImpl: (_url, { signal }) => new Promise((_resolve, reject) => {
       signal.addEventListener('abort', () => reject(signal.reason));
     }),

@@ -7,6 +7,9 @@ import { iterateHistory } from './lib/history.mjs';
 import { appendNdjson, ensureOutputFile, loadJsonOrNdjson, sanitizeError } from './lib/io.mjs';
 import { normalizeMessage } from './lib/records.mjs';
 
+export const HARD_MAX_MESSAGES_PER_CHANNEL = 5000;
+export const HARD_MAX_MESSAGES_PER_RUN = 50000;
+
 export const COMMAND = {
   name: 'history',
   summary: 'Fetch the message history of channels, threads, or forum posts into NDJSON records that include reaction counts.',
@@ -18,12 +21,14 @@ export const COMMAND = {
     after: { type: 'string', value: '<date|id>', description: 'stop at this date or message id (exclusive)' },
     before: { type: 'string', value: '<date|id>', description: 'start below this date or message id' },
     'max-pages': { type: 'number', value: '<n>', description: 'pages of 100 messages per channel', default: 50 },
-    'max-messages': { type: 'number', value: '<n>', description: 'messages per channel' },
+    'max-messages': { type: 'number', value: '<n>', description: 'messages per channel (capped at 5000)', default: HARD_MAX_MESSAGES_PER_CHANNEL },
+    'max-total-messages': { type: 'number', value: '<n>', description: 'messages per run across all channels (capped at 50000)', default: HARD_MAX_MESSAGES_PER_RUN },
     output: { type: 'string', value: '<file>', description: 'NDJSON to write; records are appended page by page', required: true },
   },
   notes: [
     'Each channel ends complete (start of channel or the --after bound reached), truncated (a page or message limit), or failed.',
     'Only complete channels support claims that something was not posted there.',
+    'The first HTTP 429 stops the run without retrying; wait at least retry_after, preferably until the next day, before resuming.',
   ],
 };
 
@@ -48,24 +53,34 @@ export async function collectHistory({
   after = null,
   before = null,
   maxPages = 50,
-  maxMessages = Infinity,
+  maxMessages = HARD_MAX_MESSAGES_PER_CHANNEL,
+  maxTotalMessages = HARD_MAX_MESSAGES_PER_RUN,
   onProgress = (line) => process.stderr.write(`${line}\n`),
 } = {}) {
+  // Callers cannot raise the ceiling by passing a larger number.
+  const channelLimit = Math.min(HARD_MAX_MESSAGES_PER_CHANNEL, Math.max(1, Math.floor(Number(maxMessages) || HARD_MAX_MESSAGES_PER_CHANNEL)));
+  const runLimit = Math.min(HARD_MAX_MESSAGES_PER_RUN, Math.max(1, Math.floor(Number(maxTotalMessages) || HARD_MAX_MESSAGES_PER_RUN)));
   const resolver = createChannelResolver(client);
   const breaker = createAbortBreaker();
   const channels = [];
+  let totalMessages = 0;
   for (const target of targets) {
-    if (breaker.aborted) {
-      channels.push({ channelId: target.id, status: 'pending' });
+    if (breaker.aborted || totalMessages >= runLimit) {
+      channels.push({
+        channelId: target.id,
+        status: 'pending',
+        reason: breaker.aborted ? breaker.aborted.reason : 'max-total-messages',
+      });
       continue;
     }
+    const allowance = Math.max(0, Math.min(channelLimit, runLimit - totalMessages));
     const summary = { channelId: target.id, name: target.known?.name ?? null, status: 'running', stopReason: null, pages: 0, messages: 0, oldestTimestamp: null, error: null };
     channels.push(summary);
     try {
       const location = await resolver.location(target.id, target.known);
       summary.name = location.thread?.name ?? location.name;
       summary.guildId = location.guildId;
-      for await (const page of iterateHistory({ client, channelId: target.id, after, before, maxPages, maxMessages })) {
+      for await (const page of iterateHistory({ client, channelId: target.id, after, before, maxPages, maxMessages: allowance })) {
         for (const message of page.messages) {
           appendNdjson(outputPath, normalizeMessage(message, {
             guildId: location.guildId,
@@ -83,9 +98,13 @@ export async function collectHistory({
         summary.stopReason = page.stopReason;
         if (page.stopReason) summary.status = page.complete ? 'complete' : 'truncated';
       }
+      totalMessages += summary.messages;
+      if (summary.stopReason === 'max-messages' && allowance < channelLimit) summary.stopReason = 'max-total-messages';
       onProgress(`[history] ${summary.name ?? target.id}: ${summary.status} (${summary.stopReason}); ${summary.messages} messages`);
       breaker.record(null);
     } catch (error) {
+      // Pages written before the failure still count toward the run budget.
+      totalMessages += summary.messages;
       summary.status = 'failed';
       summary.error = sanitizeError(error);
       onProgress(`[history] ${summary.name ?? target.id}: failed (${summary.error.status ?? summary.error.message})`);
@@ -102,7 +121,9 @@ export async function collectHistory({
       truncated: count('truncated'),
       failed: count('failed'),
       pending: count('pending'),
-      messages: channels.reduce((total, channel) => total + (channel.messages ?? 0), 0),
+      messages: totalMessages,
+      maxTotalMessages: runLimit,
+      atTotalCap: totalMessages >= runLimit,
     },
     aborted: breaker.aborted,
   };
@@ -122,7 +143,8 @@ if (process.argv[1]?.endsWith('history.mjs')) {
       after: values.after,
       before: values.before,
       maxPages: values['max-pages'],
-      maxMessages: values['max-messages'] ?? Infinity,
+      maxMessages: values['max-messages'] ?? HARD_MAX_MESSAGES_PER_CHANNEL,
+      maxTotalMessages: values['max-total-messages'] ?? HARD_MAX_MESSAGES_PER_RUN,
     });
     console.log(JSON.stringify(result, null, 2));
     process.exitCode = result.aborted ? exitCodeForAbort(result.aborted) : result.totals.failed ? 1 : 0;
