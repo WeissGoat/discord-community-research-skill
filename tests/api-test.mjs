@@ -330,10 +330,15 @@ test('preflight separates a rejected token from a network failure', async () => 
   const offline = await checkAccess({
     async whoami() { throw new DiscordApiError('Discord request failed after retries (ECONNRESET)', { retryable: true, network: true }); },
   });
+  const limited = await checkAccess({
+    async whoami() { throw new DiscordApiError('Discord rate limit hit', { status: 429, rateLimited: true, retryAfterMs: 5000 }); },
+  });
   const ok = await checkAccess({ async whoami() { return { id: '3001', username: 'user-a' }; } });
 
   assert.equal(rejected.kind, 'auth');
   assert.equal(offline.kind, 'network');
+  assert.equal(limited.kind, 'rateLimit');
+  assert.match(limited.hint, /wait at least 5s/i);
   assert.match(offline.hint, /proxy/i);
   assert.deepEqual(ok.user, { id: '3001', username: 'user-a' });
 });

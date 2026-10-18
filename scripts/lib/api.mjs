@@ -379,14 +379,20 @@ export async function checkAccess(client, { now = () => Date.now() } = {}) {
     const user = await client.whoami({ maxRetries: 1 });
     return { ok: true, latencyMs: now() - startedAt, user: { id: user?.id ?? null, username: user?.username ?? null } };
   } catch (error) {
-    const kind = error?.status === 401 ? 'auth' : error?.network ? 'network' : 'http';
+    const kind = error?.rateLimited ? 'rateLimit' : error?.status === 401 ? 'auth' : error?.network ? 'network' : 'http';
     return {
       ok: false,
       kind,
       status: error?.status ?? null,
       message: error?.message ?? String(error),
       latencyMs: now() - startedAt,
-      hint: kind === 'network' ? networkHint() : kind === 'auth' ? 'Discord rejected the token; replace DISCORD_TOKEN (or VITE_DISCORD_TOKEN) where doctor.mjs reports it is loaded from.' : null,
+      hint: kind === 'rateLimit'
+        ? `Discord rate-limited the token; wait at least ${Math.ceil((error.retryAfterMs ?? 0) / 1000)}s, preferably until the next day, before retrying.`
+        : kind === 'network'
+          ? networkHint()
+          : kind === 'auth'
+            ? 'Discord rejected the token; replace DISCORD_TOKEN (or VITE_DISCORD_TOKEN) where doctor.mjs reports it is loaded from.'
+            : null,
     };
   }
 }
